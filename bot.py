@@ -4,7 +4,7 @@ import logging
 import tempfile
 from pathlib import Path
 
-import yt_dlp
+import instaloader
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 TOKEN = os.environ["BOT_TOKEN"]
 
 INSTAGRAM_RE = re.compile(
-    r'https?://(?:www\.)?instagram\.com/(?:p|reel|tv|stories/[^/]+)/[\w-]+/?'
+    r'https?://(?:www\.)?instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)'
 )
 
 VIDEO_EXTS = {'.mp4', '.mov', '.webm', '.mkv', '.avi', '.m4v'}
@@ -45,20 +45,23 @@ async def handle_instagram(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not match:
         return
 
-    url = match.group(0)
+    shortcode = match.group(1)
     await update.message.reply_text("Baixando do Instagram... ⏳")
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        ydl_opts = {
-            'outtmpl': os.path.join(tmpdir, '%(id)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': True,
-            'noplaylist': False,
-        }
+        loader = instaloader.Instaloader(
+            download_videos=True,
+            download_video_thumbnails=False,
+            download_geotags=False,
+            download_comments=False,
+            save_metadata=False,
+            compress_json=False,
+            post_metadata_txt_pattern='',
+        )
 
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
+            post = instaloader.Post.from_shortcode(loader.context, shortcode)
+            loader.download_post(post, target=Path(tmpdir))
         except Exception as e:
             logger.error(f"Erro ao baixar do Instagram: {e}")
             await update.message.reply_text(
@@ -66,12 +69,17 @@ async def handle_instagram(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        files = sorted(Path(tmpdir).iterdir())
-        if not files:
-            await update.message.reply_text("Nenhum arquivo encontrado para enviar.")
+        media_exts = VIDEO_EXTS | IMAGE_EXTS
+        media_files = sorted(
+            f for f in Path(tmpdir).rglob('*')
+            if f.is_file() and f.suffix.lower() in media_exts
+        )
+
+        if not media_files:
+            await update.message.reply_text("Nenhum arquivo de mídia encontrado.")
             return
 
-        for file_path in files:
+        for file_path in media_files:
             ext = file_path.suffix.lower()
             try:
                 with open(file_path, 'rb') as f:
@@ -80,19 +88,14 @@ async def handle_instagram(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             chat_id=update.effective_chat.id,
                             video=f,
                         )
-                    elif ext in IMAGE_EXTS:
+                    else:
                         await context.bot.send_photo(
                             chat_id=update.effective_chat.id,
                             photo=f,
                         )
-                    else:
-                        await context.bot.send_document(
-                            chat_id=update.effective_chat.id,
-                            document=f,
-                        )
             except Exception as e:
                 logger.error(f"Erro ao enviar {file_path.name}: {e}")
-                await update.message.reply_text(f"Erro ao enviar {file_path.name}.")
+                await update.message.reply_text("Erro ao enviar o arquivo.")
 
         await update.message.reply_text("✅ Pronto!")
 
