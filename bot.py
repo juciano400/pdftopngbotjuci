@@ -5,10 +5,13 @@ import tempfile
 from pathlib import Path
 
 import instaloader
-from telegram import Update
+from PIL import Image
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
+    ConversationHandler,
     MessageHandler,
     ContextTypes,
     filters,
@@ -30,14 +33,99 @@ INSTAGRAM_RE = re.compile(
 VIDEO_EXTS = {'.mp4', '.mov', '.webm', '.mkv', '.avi', '.m4v'}
 IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp'}
 
+COLLECTING = 0
+
+
+# --- /start ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [[InlineKeyboardButton("🖼️ Criar PDF com imagens", callback_data='criar_pdf')]]
     await update.message.reply_text(
-        "Olá! Posso fazer duas coisas:\n\n"
+        "Olá! Posso fazer três coisas:\n\n"
         "📄➡️🖼️ Envie um PDF e converto cada página em imagem.\n\n"
-        "📸🎬 Envie um link do Instagram (foto, vídeo ou reel) e baixo o arquivo para você."
+        "📸🎬 Envie um link do Instagram (foto, vídeo ou reel) e baixo o arquivo.\n\n"
+        "🖼️➡️📄 Clique no botão abaixo para criar um PDF com suas imagens.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
+
+# --- Criar PDF com imagens ---
+
+async def start_create_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data['pdf_images'] = []
+    await query.message.reply_text(
+        "Envie as imagens, uma por uma.\n"
+        "Quando terminar, envie /pronto.\n"
+        "Para cancelar, envie /cancelar."
+    )
+    return COLLECTING
+
+
+async def collect_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'pdf_images' not in context.user_data:
+        context.user_data['pdf_images'] = []
+
+    if update.message.photo:
+        file_id = update.message.photo[-1].file_id
+    else:
+        file_id = update.message.document.file_id
+
+    context.user_data['pdf_images'].append(file_id)
+    count = len(context.user_data['pdf_images'])
+    await update.message.reply_text(f"Imagem {count} recebida! ✅ Envie mais ou /pronto.")
+    return COLLECTING
+
+
+async def finish_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    file_ids = context.user_data.pop('pdf_images', [])
+
+    if not file_ids:
+        await update.message.reply_text("Nenhuma imagem foi enviada. Operação cancelada.")
+        return ConversationHandler.END
+
+    await update.message.reply_text(f"Criando PDF com {len(file_ids)} imagem(ns)... ⏳")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        img_paths = []
+        for i, file_id in enumerate(file_ids):
+            tg_file = await context.bot.get_file(file_id)
+            dest = Path(tmpdir) / f"img_{i:03d}"
+            await tg_file.download_to_drive(dest)
+            img_paths.append(dest)
+
+        try:
+            pil_images = [Image.open(p).convert('RGB') for p in img_paths]
+            pdf_path = Path(tmpdir) / "resultado.pdf"
+            pil_images[0].save(
+                str(pdf_path),
+                save_all=True,
+                append_images=pil_images[1:],
+            )
+        except Exception as e:
+            logger.error(f"Erro ao criar PDF: {e}")
+            await update.message.reply_text("Erro ao criar o PDF. Tente novamente.")
+            return ConversationHandler.END
+
+        with open(pdf_path, 'rb') as f:
+            await context.bot.send_document(
+                chat_id=update.effective_chat.id,
+                document=f,
+                filename="imagens.pdf",
+            )
+
+    await update.message.reply_text("✅ PDF criado e enviado!")
+    return ConversationHandler.END
+
+
+async def cancel_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop('pdf_images', None)
+    await update.message.reply_text("Criação de PDF cancelada.")
+    return ConversationHandler.END
+
+
+# --- Download do Instagram ---
 
 async def handle_instagram(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
@@ -100,6 +188,8 @@ async def handle_instagram(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Pronto!")
 
 
+# --- Converter PDF em imagens ---
+
 async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
 
@@ -144,9 +234,24 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Conversão concluída!")
 
 
+# --- Main ---
+
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
+
+    conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(start_create_pdf, pattern='^criar_pdf$')],
+        states={
+            COLLECTING: [
+                MessageHandler(filters.PHOTO | filters.Document.IMAGE, collect_image),
+                CommandHandler('pronto', finish_pdf),
+            ]
+        },
+        fallbacks=[CommandHandler('cancelar', cancel_pdf)],
+    )
+
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(conv_handler)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_instagram))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_pdf))
     app.run_polling()
