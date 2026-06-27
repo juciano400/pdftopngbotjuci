@@ -197,6 +197,15 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Por favor, envie um arquivo PDF.")
         return
 
+    if doc.file_size and doc.file_size > 20 * 1024 * 1024:
+        tamanho_mb = doc.file_size / (1024 * 1024)
+        await update.message.reply_text(
+            f"❌ O arquivo tem {tamanho_mb:.1f} MB e não pode ser processado.\n\n"
+            "A API do Telegram limita o download de arquivos a **20 MB** para bots. "
+            "Tente comprimir o PDF ou dividi-lo em partes menores."
+        )
+        return
+
     await update.message.reply_text("Recebi o PDF! Convertendo as páginas... ⏳")
 
     with tempfile.TemporaryDirectory() as tmpdir:
