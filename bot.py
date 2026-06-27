@@ -16,7 +16,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from pdf2image import convert_from_path
+from pdf2image import convert_from_path, pdfinfo_from_path
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -205,31 +205,56 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await tg_file.download_to_drive(pdf_path)
 
         try:
-            images = convert_from_path(str(pdf_path), dpi=150, fmt="png")
+            info = pdfinfo_from_path(str(pdf_path))
+            total = info["Pages"]
         except Exception as e:
-            logger.error(f"Erro ao converter PDF: {e}")
+            logger.error(f"Erro ao ler PDF: {e}")
             await update.message.reply_text(
-                "Não consegui converter o PDF. Verifique se o arquivo não está corrompido."
+                "Não consegui ler o PDF. Verifique se o arquivo não está corrompido."
             )
             return
 
-        total = len(images)
         if total == 0:
             await update.message.reply_text("O PDF parece estar vazio.")
             return
 
-        await update.message.reply_text(f"Total de páginas: {total}. Enviando...")
+        await update.message.reply_text(f"Total de páginas: {total}. Convertendo e enviando...")
 
-        for i, img in enumerate(images, start=1):
+        for i in range(1, total + 1):
+            try:
+                [img] = convert_from_path(
+                    str(pdf_path), dpi=150, fmt="png",
+                    first_page=i, last_page=i,
+                )
+            except Exception as e:
+                logger.error(f"Erro ao converter página {i}: {e}")
+                await update.message.reply_text(f"Erro ao converter página {i}. Pulando...")
+                continue
+
             img_path = Path(tmpdir) / f"pagina_{i:03d}.png"
             img.save(str(img_path), "PNG")
 
-            with open(img_path, "rb") as f:
-                await context.bot.send_photo(
-                    chat_id=update.effective_chat.id,
-                    photo=f,
-                    caption=f"Página {i}/{total}",
-                )
+            file_size = img_path.stat().st_size
+            try:
+                with open(img_path, "rb") as f:
+                    if file_size > 9 * 1024 * 1024:
+                        await context.bot.send_document(
+                            chat_id=update.effective_chat.id,
+                            document=f,
+                            filename=f"pagina_{i:03d}.png",
+                            caption=f"Página {i}/{total}",
+                        )
+                    else:
+                        await context.bot.send_photo(
+                            chat_id=update.effective_chat.id,
+                            photo=f,
+                            caption=f"Página {i}/{total}",
+                        )
+            except Exception as e:
+                logger.error(f"Erro ao enviar página {i}: {e}")
+                await update.message.reply_text(f"Erro ao enviar página {i}.")
+
+            img_path.unlink(missing_ok=True)
 
         await update.message.reply_text("✅ Conversão concluída!")
 
