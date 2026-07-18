@@ -213,7 +213,8 @@ async def _download_youtube(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         except Exception as e:
             logger.error(f"Erro ao baixar YouTube: {e}")
             await update.message.reply_text(
-                "Não consegui baixar o vídeo. Verifique o link ou tente outro vídeo."
+                f"Erro ao baixar o vídeo:\n<code>{str(e)[:500]}</code>",
+                parse_mode="HTML",
             )
             return
 
